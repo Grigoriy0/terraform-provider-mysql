@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -11,6 +12,10 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/hashicorp/go-version"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/secretsmanager"
 
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
@@ -105,6 +110,31 @@ func Provider() terraform.ResourceProvider {
 				Optional: true,
 				Default:  300,
 			},
+
+			"aws_secret": {
+				Type:        schema.TypeMap,
+				Optional:    true,
+				Description: "Get password from AWS secret",
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"secret_name": {
+							Type:        schema.TypeString,
+							Required:    true,
+							Description: "Secret name",
+						},
+						"region": {
+							Type:        schema.TypeString,
+							Required:    true,
+							Description: "AWS region name",
+						},
+						"key": {
+							Type:        schema.TypeString,
+							Required:    true,
+							Description: "json key in secret revision",
+						},
+					},
+				},
+			},
 		},
 
 		DataSourcesMap: map[string]*schema.Resource{
@@ -133,9 +163,23 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 		proto = "unix"
 	}
 
+	var password string = d.Get("password").(string)
+
+	if v, ok := d.GetOk("aws_secret"); ok {
+		secretConfig := v.(map[string]interface{})
+		secretName := secretConfig["secret_name"].(string)
+		region := secretConfig["region"].(string)
+		key := secretConfig["key"].(string)
+		passwordFromSecret, err := getPasswordFromSecret(secretName, region, key)
+		if err != nil {
+			return nil, fmt.Errorf("Error getting secret value: %v", err)
+		}
+		password = passwordFromSecret
+	}
+
 	conf := mysql.Config{
 		User:                    d.Get("username").(string),
-		Passwd:                  d.Get("password").(string),
+		Passwd:                  password,
 		Net:                     proto,
 		Addr:                    endpoint,
 		TLSConfig:               d.Get("tls").(string),
@@ -171,6 +215,32 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 }
 
 var identQuoteReplacer = strings.NewReplacer("`", "``")
+
+func getPasswordFromSecret(secretId string, region string, key string) (string, error) {
+	session, err := session.NewSession()
+	if err != nil {
+		return "", err
+	}
+	svc := secretsmanager.New(session, aws.NewConfig().WithRegion(region))
+	input := &secretsmanager.GetSecretValueInput{
+		SecretId:     aws.String(secretId),
+		VersionStage: aws.String("AWSCURRENT"),
+	}
+	result, err := svc.GetSecretValue(input)
+	if err != nil {
+		return "", err
+	}
+	var secretValue map[string]string
+	err = json.Unmarshal([]byte(*result.SecretString), &secretValue)
+	if err != nil {
+		return "", fmt.Errorf("Unmarshal error: %v. Check that secret value isn't clean", err)
+	}
+	password, exists := secretValue[key]
+	if !exists {
+		return "", fmt.Errorf("Key \"%s\" not found in the secret \"%s\"", key, secretId)
+	}
+	return password, nil
+}
 
 func makeDialer(d *schema.ResourceData) (proxy.Dialer, error) {
 	proxyFromEnv := proxy.FromEnvironment()
