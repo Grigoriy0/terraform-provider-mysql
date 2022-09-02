@@ -72,6 +72,27 @@ The MySQL provider respects the `ALL_PROXY` and/or `all_proxy` environment varia
 $ export all_proxy="socks5://your.proxy:3306"
 ```
 
+## AWS secret usage example
+
+```
+data "aws_region" "current" {}
+
+resource "aws_secretsmanager_secret" "rds" {
+  name = "rds_credentials"
+}
+
+provider "mysql" {
+  endpoint = "rds-host"
+  username = "rds-root"
+  aws_secret = {
+    secret_name = aws_secretsmanager_secret.rds.name
+    region      = data.aws_region.current.name
+    key         = "root-password"
+  }
+}
+
+```
+
 ## Argument Reference
 
 The following arguments are supported:
